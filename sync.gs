@@ -26,6 +26,8 @@ var PROPS = PropertiesService.getScriptProperties();
 function syncAll() {
   addGuests(CONFIG.B_CALENDAR_ID, CONFIG.P_CALENDAR_ID, true);
   addGuests(CONFIG.P_CALENDAR_ID, CONFIG.B_CALENDAR_ID, false);
+  autoAcceptSynced(CONFIG.B_CALENDAR_ID, CONFIG.P_CALENDAR_ID);
+  autoAcceptSynced(CONFIG.P_CALENDAR_ID, CONFIG.B_CALENDAR_ID);
   console.log('同期完了');
 }
 
@@ -147,6 +149,82 @@ function addGuests(srcId, guestEmail, setPrivate) {
   }
 
   console.log(srcId + ': 追加=' + added + ' スキップ=' + skipped);
+}
+
+// 他人主催の予定でパートナー側がacceptedの場合、自分のresponseStatusをacceptedに更新する。
+// organizer以外がpatchで他人のresponseStatusを変えられないため、自分のカレンダー側で書き換える必要がある。
+function autoAcceptSynced(myCalendarId, partnerEmail) {
+  var past = new Date();
+  past.setDate(past.getDate() - 30);
+  var future = new Date();
+  future.setDate(future.getDate() + 200);
+
+  var allEvents = [];
+  var pageToken = null;
+  do {
+    var params = {
+      maxResults: 250,
+      timeMin: past.toISOString(),
+      timeMax: future.toISOString(),
+      showDeleted: false,
+    };
+    if (pageToken) params.pageToken = pageToken;
+
+    var response = null;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = Calendar.Events.list(myCalendarId, params);
+        if (response) break;
+      } catch (e) {
+        console.warn('autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
+        Utilities.sleep(2000 * (attempt + 1));
+      }
+    }
+    if (!response) throw new Error('autoAccept list取得失敗');
+    allEvents = allEvents.concat(response.items || []);
+    pageToken = response.nextPageToken;
+  } while (pageToken);
+
+  var accepted = 0;
+
+  for (var i = 0; i < allEvents.length; i++) {
+    var event = allEvents[i];
+
+    if (event.eventType && event.eventType !== 'default') continue;
+    if (event.status === 'cancelled') continue;
+
+    var attendees = event.attendees || [];
+    var myEntry = null;
+    var partnerEntry = null;
+    for (var j = 0; j < attendees.length; j++) {
+      var a = attendees[j];
+      if (a.self === true || a.email === myCalendarId) myEntry = a;
+      if (a.email === partnerEmail) partnerEntry = a;
+    }
+
+    if (!myEntry || myEntry.responseStatus !== 'needsAction') continue;
+    if (!partnerEntry || partnerEntry.responseStatus !== 'accepted') continue;
+
+    myEntry.responseStatus = 'accepted';
+
+    var ok = false;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        Calendar.Events.patch({ attendees: attendees }, myCalendarId, event.id, { sendUpdates: 'none' });
+        ok = true;
+        break;
+      } catch (e) {
+        if (attempt === 2) {
+          console.error('自動承認失敗 (' + event.id + '): ' + e.message + ' | ' + (event.summary || ''));
+        } else {
+          Utilities.sleep(2000 * (attempt + 1));
+        }
+      }
+    }
+    if (ok) accepted++;
+  }
+
+  console.log(myCalendarId + ': 自動承認=' + accepted);
 }
 
 // ---- セットアップ ----

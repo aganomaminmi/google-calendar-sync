@@ -9,6 +9,12 @@
 - **B(Business) → P(Personal)**: Pをゲスト追加（`visibility: private` 付き）
 - **P(Personal) → B(Business)**: Bをゲスト追加
 
+### 招待された予定の自動承認
+
+KosmoTime経由や他人主催で招待された予定は、自分がorganizerではないため `responseStatus: 'accepted'` でゲスト追加してもGoogle側で `needsAction` に戻されます。
+
+そのため、もう一方のカレンダーで承認済みの予定について、こちら側でも `responseStatus` を `accepted` に書き換える `autoAcceptSynced` が `syncAll` 内で動きます。結果として、**片方で参加登録すれば、もう片方も自動承認**されます。
+
 ### visibility: private の効果
 
 Bの予定がPのカレンダーに表示されますが、Pのカレンダーを第三者と共有した場合、Bの予定は「予定あり」としか表示されません。自分自身は詳細を確認できます。
