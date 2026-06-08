@@ -118,6 +118,8 @@ function addGuests(srcId, guestEmails, setPrivate) {
           if (response) break;
         } catch (innerE) {
           if (innerE.message && innerE.message.includes('410')) throw innerE;
+          // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
+          if (innerE.message && innerE.message.includes('Not Found')) throw innerE;
           console.warn(srcId + ' list リトライ ' + (attempt + 1) + '/3: ' + innerE.message);
           Utilities.sleep(2000 * (attempt + 1));
         }
@@ -236,6 +238,8 @@ function autoAcceptSynced(myCalendarId, partnerEmails) {
         response = Calendar.Events.list(myCalendarId, params);
         if (response) break;
       } catch (e) {
+        // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
+        if (e.message && e.message.includes('Not Found')) throw e;
         console.warn(myCalendarId + ' autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
         Utilities.sleep(2000 * (attempt + 1));
       }
