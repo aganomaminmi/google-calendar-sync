@@ -1,22 +1,40 @@
 // ============================================
-// Google Calendar 双方向同期スクリプト（招待方式）
+// Google Calendar 多者間同期スクリプト（招待方式・完全メッシュ）
 // ============================================
-// B(Business) → P(Personal): Pをゲスト追加（visibility: private）
-// P(Personal) → B(Business): Bをゲスト追加
+// CONFIG.CALENDAR_IDS に列挙したカレンダー同士を相互にゲスト追加して同期する。
+// 2者でも3者以上でも動く（全ペアを相互に同期する完全メッシュ）。
+//
+//   例: [B, P, C] なら B↔P / B↔C / P↔C をすべて双方向同期
+//
+// すべてのカレンダーに対して実行アカウントが編集権限を持っている必要がある
+// （= 各カレンダーを相互に編集権限付きで共有しておくこと）。
 //
 // セットアップ手順:
 // 1. script.google.com で新しいプロジェクトを作成
 // 2. このコードを貼り付け
 // 3. 左メニュー「サービス」→「Google Calendar API」を追加
-// 4. 下の CONFIG にカレンダーIDを入力
-// 5. setupTrigger() を実行（5分間隔のトリガーが設定される）
-// 6. syncAll() を手動実行して初回同期（権限の承認を求められます）
+// 4. 下の CONFIG.CALENDAR_IDS に同期したいカレンダーIDを列挙
+// 5. 全カレンダーを相互に共有（編集権限付き）
+// 6. setupTrigger() を実行（5分間隔のトリガーが設定される）
+// 7. syncAll() を手動実行して初回同期（権限の承認を求められます）
 // ============================================
 
 // ---- 設定 ----
 var CONFIG = {
-  B_CALENDAR_ID: 'your-business@example.com',
-  P_CALENDAR_ID: 'your-personal@example.com',
+  // 同期したいカレンダーIDを列挙する。提携先などを足したい時はここに追記。
+  CALENDAR_IDS: [
+    'your-business@example.com',   // B: 業務
+    'your-personal@example.com',   // P: プライベート
+    'your-partner@example.com',    // C: 提携先
+  ],
+
+  // ここに列挙したカレンダー「発」の予定は visibility: private で同期する。
+  // （相手カレンダーを第三者と共有しても「予定あり」としか見えず、詳細は本人だけ確認できる）
+  // 業務予定の詳細を隠したい場合は業務カレンダーIDを入れる。
+  PRIVATE_SOURCE_IDS: [
+    'your-business@example.com',
+    'your-partner@example.com',
+  ],
 };
 
 var PROPS = PropertiesService.getScriptProperties();
@@ -24,14 +42,50 @@ var PROPS = PropertiesService.getScriptProperties();
 // ---- メイン ----
 
 function syncAll() {
-  addGuests(CONFIG.B_CALENDAR_ID, CONFIG.P_CALENDAR_ID, true);
-  addGuests(CONFIG.P_CALENDAR_ID, CONFIG.B_CALENDAR_ID, false);
-  autoAcceptSynced(CONFIG.B_CALENDAR_ID, CONFIG.P_CALENDAR_ID);
-  autoAcceptSynced(CONFIG.P_CALENDAR_ID, CONFIG.B_CALENDAR_ID);
+  var ids = CONFIG.CALENDAR_IDS;
+  var errors = [];
+
+  // 各カレンダーを送信元として、それ以外の全カレンダーをゲスト追加。
+  // 1つのカレンダーが失敗（未共有・ID誤り等）しても他は止めず続行する。
+  for (var i = 0; i < ids.length; i++) {
+    var src = ids[i];
+    var guests = otherIds(ids, src);
+    var setPrivate = CONFIG.PRIVATE_SOURCE_IDS.indexOf(src) !== -1;
+    try {
+      addGuests(src, guests, setPrivate);
+    } catch (e) {
+      console.error('スキップ addGuests (' + src + '): ' + e.message);
+      errors.push(src);
+    }
+  }
+
+  // 各カレンダーで、他のいずれかが承認済みの予定を自分側でも自動承認
+  for (var k = 0; k < ids.length; k++) {
+    var me = ids[k];
+    try {
+      autoAcceptSynced(me, otherIds(ids, me));
+    } catch (e) {
+      console.error('スキップ autoAccept (' + me + '): ' + e.message);
+      errors.push(me);
+    }
+  }
+
+  if (errors.length) {
+    console.warn('一部のカレンダーで失敗（要確認）: ' + errors.join(', '));
+  }
   console.log('同期完了');
 }
 
-function addGuests(srcId, guestEmail, setPrivate) {
+// 自分以外のカレンダーIDを返す
+function otherIds(ids, self) {
+  return ids.filter(function (id) {
+    return id !== self;
+  });
+}
+
+// srcId のカレンダーを1回走査し、未招待の guestEmails をまとめてゲスト追加する。
+// syncToken は送信元(srcId)ごとに1つなので、複数ゲストへ配っても差分取得が壊れない。
+function addGuests(srcId, guestEmails, setPrivate) {
   var tokenKey = 'syncToken_' + srcId;
   var syncToken = PROPS.getProperty(tokenKey);
   var allEvents = [];
@@ -64,11 +118,11 @@ function addGuests(srcId, guestEmail, setPrivate) {
           if (response) break;
         } catch (innerE) {
           if (innerE.message && innerE.message.includes('410')) throw innerE;
-          console.warn('list リトライ ' + (attempt + 1) + '/3: ' + innerE.message);
+          console.warn(srcId + ' list リトライ ' + (attempt + 1) + '/3: ' + innerE.message);
           Utilities.sleep(2000 * (attempt + 1));
         }
       }
-      if (!response) throw new Error('list取得失敗');
+      if (!response) throw new Error('list取得失敗（カレンダーID or 共有設定を確認）: ' + srcId);
       allEvents = allEvents.concat(response.items || []);
       pageToken = response.nextPageToken;
       nextSyncToken = response.nextSyncToken;
@@ -77,7 +131,7 @@ function addGuests(srcId, guestEmail, setPrivate) {
     if (e.message && e.message.includes('410')) {
       console.log(srcId + ': syncToken期限切れ。フルリセットします');
       PROPS.deleteProperty(tokenKey);
-      addGuests(srcId, guestEmail, setPrivate);
+      addGuests(srcId, guestEmails, setPrivate);
       return;
     }
     throw e;
@@ -100,26 +154,32 @@ function addGuests(srcId, guestEmail, setPrivate) {
       continue;
     }
 
-    // 既にゲストに入っているかチェック
     var attendees = event.attendees || [];
-    var alreadyInvited = false;
-    for (var j = 0; j < attendees.length; j++) {
-      if (attendees[j].email === guestEmail) {
-        alreadyInvited = true;
-        break;
+
+    // 未招待のゲストだけを追加
+    var newlyAdded = 0;
+    for (var g = 0; g < guestEmails.length; g++) {
+      var guestEmail = guestEmails[g];
+      var alreadyInvited = false;
+      for (var j = 0; j < attendees.length; j++) {
+        if (attendees[j].email === guestEmail) {
+          alreadyInvited = true;
+          break;
+        }
       }
+      if (alreadyInvited) continue;
+
+      attendees.push({
+        email: guestEmail,
+        responseStatus: 'accepted',
+      });
+      newlyAdded++;
     }
 
-    if (alreadyInvited) {
+    if (newlyAdded === 0) {
       skipped++;
       continue;
     }
-
-    // ゲスト追加
-    attendees.push({
-      email: guestEmail,
-      responseStatus: 'accepted',
-    });
 
     var patch = { attendees: attendees };
 
@@ -151,9 +211,9 @@ function addGuests(srcId, guestEmail, setPrivate) {
   console.log(srcId + ': 追加=' + added + ' スキップ=' + skipped);
 }
 
-// 他人主催の予定でパートナー側がacceptedの場合、自分のresponseStatusをacceptedに更新する。
+// 他人主催の予定でいずれかのパートナーがacceptedの場合、自分のresponseStatusをacceptedに更新する。
 // organizer以外がpatchで他人のresponseStatusを変えられないため、自分のカレンダー側で書き換える必要がある。
-function autoAcceptSynced(myCalendarId, partnerEmail) {
+function autoAcceptSynced(myCalendarId, partnerEmails) {
   var past = new Date();
   past.setDate(past.getDate() - 30);
   var future = new Date();
@@ -176,11 +236,11 @@ function autoAcceptSynced(myCalendarId, partnerEmail) {
         response = Calendar.Events.list(myCalendarId, params);
         if (response) break;
       } catch (e) {
-        console.warn('autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
+        console.warn(myCalendarId + ' autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
         Utilities.sleep(2000 * (attempt + 1));
       }
     }
-    if (!response) throw new Error('autoAccept list取得失敗');
+    if (!response) throw new Error('autoAccept list取得失敗（カレンダーID or 共有設定を確認）: ' + myCalendarId);
     allEvents = allEvents.concat(response.items || []);
     pageToken = response.nextPageToken;
   } while (pageToken);
@@ -195,15 +255,17 @@ function autoAcceptSynced(myCalendarId, partnerEmail) {
 
     var attendees = event.attendees || [];
     var myEntry = null;
-    var partnerEntry = null;
+    var anyPartnerAccepted = false;
     for (var j = 0; j < attendees.length; j++) {
       var a = attendees[j];
       if (a.self === true || a.email === myCalendarId) myEntry = a;
-      if (a.email === partnerEmail) partnerEntry = a;
+      if (partnerEmails.indexOf(a.email) !== -1 && a.responseStatus === 'accepted') {
+        anyPartnerAccepted = true;
+      }
     }
 
     if (!myEntry || myEntry.responseStatus !== 'needsAction') continue;
-    if (!partnerEntry || partnerEntry.responseStatus !== 'accepted') continue;
+    if (!anyPartnerAccepted) continue;
 
     myEntry.responseStatus = 'accepted';
 
@@ -230,7 +292,7 @@ function autoAcceptSynced(myCalendarId, partnerEmail) {
 // ---- セットアップ ----
 
 function setupTrigger() {
-  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (trigger.getHandlerFunction() === 'syncAll') {
       ScriptApp.deleteTrigger(trigger);
     }
@@ -247,7 +309,7 @@ function setupTrigger() {
 // ---- ユーティリティ ----
 
 function resetSync() {
-  PROPS.getKeys().forEach(function(key) {
+  PROPS.getKeys().forEach(function (key) {
     PROPS.deleteProperty(key);
   });
   console.log('同期データをリセットしました');
