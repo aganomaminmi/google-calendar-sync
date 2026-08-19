@@ -117,7 +117,8 @@ function addGuests(srcId, guestEmails, setPrivate) {
           response = Calendar.Events.list(srcId, params);
           if (response) break;
         } catch (innerE) {
-          if (innerE.message && innerE.message.includes('410')) throw innerE;
+          // 410(syncToken失効)はメッセージに「410」が含まれない形で来るので文言でも判定する
+          if (innerE.message && (innerE.message.includes('410') || innerE.message.includes('full sync is required'))) throw innerE;
           // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
           if (innerE.message && innerE.message.includes('Not Found')) throw innerE;
           console.warn(srcId + ' list リトライ ' + (attempt + 1) + '/3: ' + innerE.message);
@@ -130,7 +131,7 @@ function addGuests(srcId, guestEmails, setPrivate) {
       nextSyncToken = response.nextSyncToken;
     } while (pageToken);
   } catch (e) {
-    if (e.message && e.message.includes('410')) {
+    if (e.message && (e.message.includes('410') || e.message.includes('full sync is required'))) {
       console.log(srcId + ': syncToken期限切れ。フルリセットします');
       PROPS.deleteProperty(tokenKey);
       addGuests(srcId, guestEmails, setPrivate);
