@@ -39,6 +39,11 @@ var CONFIG = {
 
 var PROPS = PropertiesService.getScriptProperties();
 
+// 連続失敗の回数を数えるキー。Google 側の瞬断1回では通知せず、
+// FAIL_STREAK_THRESHOLD 回続いたときだけ throw してトリガーの失敗通知を出す。
+var FAIL_STREAK_KEY = 'failStreak';
+var FAIL_STREAK_THRESHOLD = 3; // 5分間隔 × 3 = 15分連続で失敗したら通知
+
 // ---- メイン ----
 
 function syncAll() {
@@ -52,7 +57,10 @@ function syncAll() {
     var guests = otherIds(ids, src);
     var setPrivate = CONFIG.PRIVATE_SOURCE_IDS.indexOf(src) !== -1;
     try {
-      addGuests(src, guests, setPrivate);
+      // patch が失敗し続けると syncToken が進まないまま止まるので、失敗件数も errors 扱いにする
+      if (addGuests(src, guests, setPrivate) > 0) {
+        errors.push(src + '(ゲスト追加失敗)');
+      }
     } catch (e) {
       console.error('スキップ addGuests (' + src + '): ' + e.message);
       errors.push(src);
@@ -70,9 +78,21 @@ function syncAll() {
     }
   }
 
+  // 失敗を握りつぶすと同期が止まったままでも何も届かないので、連続失敗だけは通知する。
+  // 1回きりの失敗（Google 側の瞬断）は次の実行で回復するため黙って抜ける。
   if (errors.length) {
-    console.warn('一部のカレンダーで失敗（要確認）: ' + errors.join(', '));
+    var streak = Number(PROPS.getProperty(FAIL_STREAK_KEY) || 0) + 1;
+    PROPS.setProperty(FAIL_STREAK_KEY, String(streak));
+    console.warn('一部のカレンダーで失敗（' + streak + '回連続）: ' + errors.join(', '));
+    if (streak >= FAIL_STREAK_THRESHOLD) {
+      throw new Error(
+        '同期が' + streak + '回連続で失敗しています（対象: ' + errors.join(', ') + '）'
+      );
+    }
+    return;
   }
+
+  PROPS.deleteProperty(FAIL_STREAK_KEY);
   console.log('同期完了');
 }
 
@@ -85,6 +105,7 @@ function otherIds(ids, self) {
 
 // srcId のカレンダーを1回走査し、未招待の guestEmails をまとめてゲスト追加する。
 // syncToken は送信元(srcId)ごとに1つなので、複数ゲストへ配っても差分取得が壊れない。
+// 戻り値: ゲスト追加に失敗したイベント件数（0 なら全件成功）
 function addGuests(srcId, guestEmails, setPrivate) {
   var tokenKey = 'syncToken_' + srcId;
   var syncToken = PROPS.getProperty(tokenKey);
@@ -122,7 +143,7 @@ function addGuests(srcId, guestEmails, setPrivate) {
           // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
           if (innerE.message && innerE.message.includes('Not Found')) throw innerE;
           console.warn(srcId + ' list リトライ ' + (attempt + 1) + '/3: ' + innerE.message);
-          Utilities.sleep(2000 * (attempt + 1));
+          if (attempt < 2) Utilities.sleep(2000 * (attempt + 1));
         }
       }
       if (!response) throw new Error('list取得失敗（カレンダーID or 共有設定を確認）: ' + srcId);
@@ -134,13 +155,12 @@ function addGuests(srcId, guestEmails, setPrivate) {
     if (e.message && (e.message.includes('410') || e.message.includes('full sync is required'))) {
       console.log(srcId + ': syncToken期限切れ。フルリセットします');
       PROPS.deleteProperty(tokenKey);
-      addGuests(srcId, guestEmails, setPrivate);
-      return;
+      return addGuests(srcId, guestEmails, setPrivate);
     }
     throw e;
   }
 
-  var added = 0, skipped = 0;
+  var added = 0, skipped = 0, failed = 0;
 
   for (var i = 0; i < allEvents.length; i++) {
     var event = allEvents[i];
@@ -204,14 +224,19 @@ function addGuests(srcId, guestEmails, setPrivate) {
         }
       }
     }
-    if (patchSuccess) { added++; } else { skipped++; }
+    if (patchSuccess) { added++; } else { failed++; }
   }
 
-  if (nextSyncToken) {
+  // 1件でも patch に失敗していたら syncToken を進めない。
+  // 進めると差分同期で次回以降そのイベントが返らず、ゲスト未追加のまま取りこぼしが永続化する。
+  if (nextSyncToken && failed === 0) {
     PROPS.setProperty(tokenKey, nextSyncToken);
+  } else if (failed > 0) {
+    console.warn(srcId + ': ' + failed + '件失敗したため syncToken を進めません（次回まとめて再試行）');
   }
 
-  console.log(srcId + ': 追加=' + added + ' スキップ=' + skipped);
+  console.log(srcId + ': 追加=' + added + ' スキップ=' + skipped + ' 失敗=' + failed);
+  return failed;
 }
 
 // 他人主催の予定でいずれかのパートナーがacceptedの場合、自分のresponseStatusをacceptedに更新する。
@@ -242,7 +267,7 @@ function autoAcceptSynced(myCalendarId, partnerEmails) {
         // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
         if (e.message && e.message.includes('Not Found')) throw e;
         console.warn(myCalendarId + ' autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
-        Utilities.sleep(2000 * (attempt + 1));
+        if (attempt < 2) Utilities.sleep(2000 * (attempt + 1));
       }
     }
     if (!response) throw new Error('autoAccept list取得失敗（カレンダーID or 共有設定を確認）: ' + myCalendarId);
