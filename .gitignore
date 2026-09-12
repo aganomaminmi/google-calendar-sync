@@ -3,3 +3,7 @@ sync.draft.gs
 
 # ローカル運用メモ（起動時キャッチアップ指示。公開物ではない）
 CLAUDE.md
+
+# clasp push 用の作業ディレクトリと設定（実メアド入り・scriptId を含む）
+.gas/
+.clasp.json
