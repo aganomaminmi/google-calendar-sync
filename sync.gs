@@ -67,16 +67,8 @@ function syncAll() {
     }
   }
 
-  // 各カレンダーで、他のいずれかが承認済みの予定を自分側でも自動承認
-  for (var k = 0; k < ids.length; k++) {
-    var me = ids[k];
-    try {
-      autoAcceptSynced(me, otherIds(ids, me));
-    } catch (e) {
-      console.error('スキップ autoAccept (' + me + '): ' + e.message);
-      errors.push(me);
-    }
-  }
+  // 参加・不参加・未定の回答を全カレンダーで揃える
+  errors = errors.concat(syncResponses(ids));
 
   // 失敗を握りつぶすと同期が止まったままでも何も届かないので、連続失敗だけは通知する。
   // 1回きりの失敗（Google 側の瞬断）は次の実行で回復するため黙って抜ける。
@@ -239,9 +231,134 @@ function addGuests(srcId, guestEmails, setPrivate) {
   return failed;
 }
 
-// 他人主催の予定でいずれかのパートナーがacceptedの場合、自分のresponseStatusをacceptedに更新する。
-// organizer以外がpatchで他人のresponseStatusを変えられないため、自分のカレンダー側で書き換える必要がある。
-function autoAcceptSynced(myCalendarId, partnerEmails) {
+// 回答（responseStatus）を1文字で保存するための対応表。'-' はそのカレンダーが予定に参加していないことを表す。
+var RSVP_KEY_PREFIX = 'rsvp_';
+var STATUS_TO_CODE = { accepted: 'a', declined: 'd', tentative: 't', needsAction: 'n' };
+var CODE_TO_STATUS = { a: 'accepted', d: 'declined', t: 'tentative', n: 'needsAction' };
+
+// 同じ予定への回答（参加・不参加・未定）を全カレンダーで揃える。
+// 前回揃えたときの各カレンダーの回答を予定ごとに記録しておき、そこから変わった回答を他のカレンダーへ写す。
+// 自分の回答は自分のカレンダー側の予定でしか書き換えられないため、カレンダーごとに patch する。
+// 戻り値: 失敗したカレンダー・予定の一覧（空なら全件成功）
+function syncResponses(ids) {
+  var errors = [];
+  var copiesById = {}; // event.id -> ids と同じ並びの各カレンダーでの予定（参加していなければ null）
+  var listFailed = false;
+
+  for (var c = 0; c < ids.length; c++) {
+    var events;
+    try {
+      events = listWindow(ids[c]);
+    } catch (e) {
+      console.error('スキップ syncResponses (' + ids[c] + '): ' + e.message);
+      errors.push(ids[c]);
+      listFailed = true;
+      continue;
+    }
+    for (var i = 0; i < events.length; i++) {
+      var event = events[i];
+      if (event.eventType && event.eventType !== 'default') continue;
+      if (event.status === 'cancelled') continue;
+      if (!selfEntry(event, ids[c])) continue;
+      if (!copiesById[event.id]) copiesById[event.id] = ids.map(function () { return null; });
+      copiesById[event.id][c] = event;
+    }
+  }
+
+  var stored = PROPS.getProperties();
+  var updated = 0;
+
+  Object.keys(copiesById).forEach(function (eventId) {
+    var copies = copiesById[eventId];
+    if (copies.filter(Boolean).length < 2) return;
+
+    var key = RSVP_KEY_PREFIX + eventId;
+    var prev = stored[key] || '';
+    var current = copies.map(function (ev, c) {
+      return ev ? STATUS_TO_CODE[selfEntry(ev, ids[c]).responseStatus] || 'n' : '-';
+    }).join('');
+
+    // 前回から変わった回答を集める（未回答への変化は写さない）
+    var changed = {};
+    for (var c = 0; c < current.length; c++) {
+      var code = current[c];
+      if (code !== '-' && code !== 'n' && code !== prev[c]) changed[code] = true;
+    }
+    var codes = Object.keys(changed);
+
+    if (codes.length !== 1) {
+      // 2つ以上のカレンダーで別々の回答に変わったときは、どちらが正しいか決められないので揃えない
+      if (codes.length > 1) {
+        console.warn('回答が食い違うため揃えません (' + eventId + '): ' + current + ' | ' + (copies.filter(Boolean)[0].summary || ''));
+      }
+      if (prev !== current) PROPS.setProperty(key, current);
+      return;
+    }
+
+    var target = codes[0];
+    var ok = true;
+    for (var c = 0; c < copies.length; c++) {
+      if (!copies[c] || current[c] === target) continue;
+      if (!patchResponses(ids[c], copies[c], ids, CODE_TO_STATUS[target])) ok = false;
+    }
+
+    // 1件でも失敗したら記録を進めず、次回も同じ変更として再試行する
+    if (ok) {
+      PROPS.setProperty(key, current.replace(/[adtn]/g, target));
+      updated++;
+    } else {
+      errors.push(eventId + '(回答の反映失敗)');
+    }
+  });
+
+  // 一覧の取得に失敗したカレンダーがあると記録の要否を判定できないので、そのときは掃除しない
+  if (!listFailed) {
+    Object.keys(stored).forEach(function (key) {
+      if (key.indexOf(RSVP_KEY_PREFIX) !== 0) return;
+      var copies = copiesById[key.slice(RSVP_KEY_PREFIX.length)];
+      if (!copies || copies.filter(Boolean).length < 2) PROPS.deleteProperty(key);
+    });
+  }
+
+  console.log('回答の反映=' + updated);
+  return errors;
+}
+
+// 予定の参加者のうち、そのカレンダー自身のエントリを返す
+function selfEntry(event, calendarId) {
+  var attendees = event.attendees || [];
+  for (var j = 0; j < attendees.length; j++) {
+    if (attendees[j].self === true || attendees[j].email === calendarId) return attendees[j];
+  }
+  return null;
+}
+
+// calendarId 側の予定で、同期対象カレンダー全員の回答を status にして patch する。
+// 古い回答のまま送ると主催者側の予定で他カレンダーの回答を巻き戻すので、全員分を揃えて送る。
+function patchResponses(calendarId, event, ids, status) {
+  var attendees = event.attendees || [];
+  for (var j = 0; j < attendees.length; j++) {
+    if (attendees[j].self === true || ids.indexOf(attendees[j].email) !== -1) {
+      attendees[j].responseStatus = status;
+    }
+  }
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      Calendar.Events.patch({ attendees: attendees }, calendarId, event.id, { sendUpdates: 'none' });
+      return true;
+    } catch (e) {
+      if (attempt === 2) {
+        console.error('回答の反映失敗 (' + calendarId + ' / ' + event.id + '): ' + e.message + ' | ' + (event.summary || ''));
+      } else {
+        Utilities.sleep(2000 * (attempt + 1));
+      }
+    }
+  }
+  return false;
+}
+
+// 過去30日〜200日先の予定を全件取得する
+function listWindow(calendarId) {
   var past = new Date();
   past.setDate(past.getDate() - 30);
   var future = new Date();
@@ -261,62 +378,21 @@ function autoAcceptSynced(myCalendarId, partnerEmails) {
     var response = null;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
-        response = Calendar.Events.list(myCalendarId, params);
+        response = Calendar.Events.list(calendarId, params);
         if (response) break;
       } catch (e) {
-        // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncAll側でスキップ）
+        // 404(Not Found)は未共有/ID誤りでリトライしても直らないので即諦める（syncResponses側でスキップ）
         if (e.message && e.message.includes('Not Found')) throw e;
-        console.warn(myCalendarId + ' autoAccept list リトライ ' + (attempt + 1) + '/3: ' + e.message);
+        console.warn(calendarId + ' list リトライ ' + (attempt + 1) + '/3: ' + e.message);
         if (attempt < 2) Utilities.sleep(2000 * (attempt + 1));
       }
     }
-    if (!response) throw new Error('autoAccept list取得失敗（カレンダーID or 共有設定を確認）: ' + myCalendarId);
+    if (!response) throw new Error('list取得失敗（カレンダーID or 共有設定を確認）: ' + calendarId);
     allEvents = allEvents.concat(response.items || []);
     pageToken = response.nextPageToken;
   } while (pageToken);
 
-  var accepted = 0;
-
-  for (var i = 0; i < allEvents.length; i++) {
-    var event = allEvents[i];
-
-    if (event.eventType && event.eventType !== 'default') continue;
-    if (event.status === 'cancelled') continue;
-
-    var attendees = event.attendees || [];
-    var myEntry = null;
-    var anyPartnerAccepted = false;
-    for (var j = 0; j < attendees.length; j++) {
-      var a = attendees[j];
-      if (a.self === true || a.email === myCalendarId) myEntry = a;
-      if (partnerEmails.indexOf(a.email) !== -1 && a.responseStatus === 'accepted') {
-        anyPartnerAccepted = true;
-      }
-    }
-
-    if (!myEntry || myEntry.responseStatus !== 'needsAction') continue;
-    if (!anyPartnerAccepted) continue;
-
-    myEntry.responseStatus = 'accepted';
-
-    var ok = false;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        Calendar.Events.patch({ attendees: attendees }, myCalendarId, event.id, { sendUpdates: 'none' });
-        ok = true;
-        break;
-      } catch (e) {
-        if (attempt === 2) {
-          console.error('自動承認失敗 (' + event.id + '): ' + e.message + ' | ' + (event.summary || ''));
-        } else {
-          Utilities.sleep(2000 * (attempt + 1));
-        }
-      }
-    }
-    if (ok) accepted++;
-  }
-
-  console.log(myCalendarId + ': 自動承認=' + accepted);
+  return allEvents;
 }
 
 // ---- セットアップ ----
