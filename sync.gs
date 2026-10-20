@@ -191,12 +191,24 @@ function addGuests(srcId, guestEmails, setPrivate) {
       newlyAdded++;
     }
 
-    if (newlyAdded === 0) {
+    // 自分が主催者で、同期先のカレンダー以外のゲストがいない予定は、ゲストからも変更できるようにする
+    var allowModify = false;
+    if (event.organizer && event.organizer.self && event.guestsCanModify !== true) {
+      allowModify = attendees.every(function (a) {
+        return a.email === srcId || CONFIG.CALENDAR_IDS.indexOf(a.email) !== -1;
+      });
+    }
+
+    if (newlyAdded === 0 && !allowModify) {
       skipped++;
       continue;
     }
 
     var patch = { attendees: attendees };
+
+    if (allowModify) {
+      patch.guestsCanModify = true;
+    }
 
     if (setPrivate) {
       patch.visibility = 'private';
