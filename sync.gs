@@ -30,9 +30,10 @@ var CONFIG = {
 
   // ここに列挙したカレンダー「発」の予定は visibility: private で同期する。
   // （相手カレンダーを第三者と共有しても「予定あり」としか見えず、詳細は本人だけ確認できる）
-  // 業務予定の詳細を隠したい場合は業務カレンダーIDを入れる。
+  // 各カレンダー発の予定は、ほかのカレンダーの組織からは「予定あり」にする（全カレンダーを入れる）。
   PRIVATE_SOURCE_IDS: [
     'your-business@example.com',
+    'your-personal@example.com',
     'your-partner@example.com',
   ],
 };
@@ -199,7 +200,9 @@ function addGuests(srcId, guestEmails, setPrivate) {
       });
     }
 
-    if (newlyAdded === 0 && !allowModify) {
+    var needsPrivate = setPrivate && event.visibility !== 'private';
+
+    if (newlyAdded === 0 && !allowModify && !needsPrivate) {
       skipped++;
       continue;
     }
