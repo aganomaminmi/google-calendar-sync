@@ -26,7 +26,7 @@ KosmoTime経由や他人主催で招待された予定は、自分がorganizer�
 
 1. [script.google.com](https://script.google.com) で新しいプロジェクトを作成
 2. `sync.gs` の内容を貼り付け
-3. 左メニュー「サービス」→「Google Calendar API」を追加
+3. 左メニュー「サービス」→「Google Calendar API」を追加。「プロジェクトの設定」で「appsscript.json」マニフェストを表示し、このリポジトリの `appsscript.json` の `oauthScopes`（`calendar.events` と `script.scriptapp` だけ）を反映する
 4. `CONFIG.CALENDAR_IDS` に同期したいカレンダーIDを列挙（提携先などを足す時はここに追記）
 5. 全カレンダーを相互に共有（編集権限付き）。**すべてのカレンダーに実行アカウントの編集権限が必要**
 6. `syncAll` を実行（初回は権限の承認が求められます）
