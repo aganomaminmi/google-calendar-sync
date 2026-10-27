@@ -222,7 +222,7 @@ function addGuests(srcId, guestEmails, setPrivate) {
         break;
       } catch (e) {
         if (attempt === 2) {
-          console.error('ゲスト追加失敗 (' + event.id + '): ' + e.message + ' | ' + (event.summary || ''));
+          console.error('ゲスト追加失敗 (' + event.id + '): ' + e.message);
         } else {
           Utilities.sleep(2000 * (attempt + 1));
         }
@@ -301,7 +301,7 @@ function syncResponses(ids) {
     if (codes.length !== 1) {
       // 2つ以上のカレンダーで別々の回答に変わったときは、どちらが正しいか決められないので揃えない
       if (codes.length > 1) {
-        console.warn('回答が食い違うため揃えません (' + eventId + '): ' + current + ' | ' + (copies.filter(Boolean)[0].summary || ''));
+        console.warn('回答が食い違うため揃えません (' + eventId + '): ' + current);
       }
       if (prev !== current) PROPS.setProperty(key, current);
       return;
@@ -360,7 +360,7 @@ function patchResponses(calendarId, event, ids, status) {
       return true;
     } catch (e) {
       if (attempt === 2) {
-        console.error('回答の反映失敗 (' + calendarId + ' / ' + event.id + '): ' + e.message + ' | ' + (event.summary || ''));
+        console.error('回答の反映失敗 (' + calendarId + ' / ' + event.id + '): ' + e.message);
       } else {
         Utilities.sleep(2000 * (attempt + 1));
       }
