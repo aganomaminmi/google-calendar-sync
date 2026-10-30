@@ -164,9 +164,9 @@ function addGuests(srcId, guestEmails, setPrivate) {
       continue;
     }
 
-    // キャンセル済みはスキップ
+    // キャンセル済み: ゲストとして参加していた予定が消されたなら、主催者側の予定も消してほかのカレンダーからも消す
     if (event.status === 'cancelled') {
-      skipped++;
+      if (propagateDelete(srcId, event.id)) { skipped++; } else { failed++; }
       continue;
     }
 
@@ -244,6 +244,58 @@ function addGuests(srcId, guestEmails, setPrivate) {
 
   console.log(srcId + ': 追加=' + added + ' スキップ=' + skipped + ' 失敗=' + failed);
   return failed;
+}
+
+// srcId のカレンダーで消えた予定が、同期先の別カレンダーが主催する予定へのゲスト参加だったら、主催者側の予定も消す。
+// 主催者側で消せば、ほかのゲストのカレンダーからも消える。
+// 主催者自身が消した・srcId がゲストから外されただけ・同期先以外の人も招待している予定は消さない。
+// 戻り値: 取得・削除に失敗したら false（syncToken を進めず次回再試行する）
+function propagateDelete(srcId, eventId) {
+  var ids = otherIds(CONFIG.CALENDAR_IDS, srcId);
+  for (var c = 0; c < ids.length; c++) {
+    var ev = null;
+    try {
+      ev = Calendar.Events.get(ids[c], eventId);
+    } catch (e) {
+      // そのカレンダーに予定が無い（参加していない・削除済み）
+      if (e.message && (e.message.includes('Not Found') || e.message.includes('Gone'))) continue;
+      console.error('削除の確認失敗 (' + ids[c] + ' / ' + eventId + '): ' + e.message);
+      return false;
+    }
+    if (!ev || ev.status === 'cancelled' || !ev.organizer || !ev.organizer.self) continue;
+
+    var attendees = ev.attendees || [];
+    var stillGuest = attendees.some(function (a) {
+      return a.email === srcId && !a.organizer;
+    });
+    if (!stillGuest) return true;
+
+    // 同期先以外の人がいる予定を消すと、その人たちの予定まで取り消されるので消さない
+    var internal = attendees.every(function (a) {
+      return a.email === ids[c] || CONFIG.CALENDAR_IDS.indexOf(a.email) !== -1;
+    });
+    if (!internal) {
+      console.log('同期先以外のゲストがいるため削除を伝えません (' + eventId + ')');
+      return true;
+    }
+
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        Calendar.Events.remove(ids[c], eventId, { sendUpdates: 'none' });
+        console.log(srcId + ' での削除を主催者側に反映 (' + eventId + ')');
+        return true;
+      } catch (e) {
+        if (e.message && (e.message.includes('Not Found') || e.message.includes('Gone'))) return true;
+        if (attempt === 2) {
+          console.error('削除の反映失敗 (' + ids[c] + ' / ' + eventId + '): ' + e.message);
+        } else {
+          Utilities.sleep(2000 * (attempt + 1));
+        }
+      }
+    }
+    return false;
+  }
+  return true;
 }
 
 // 回答（responseStatus）を1文字で保存するための対応表。'-' はそのカレンダーが予定に参加していないことを表す。
